@@ -1,44 +1,47 @@
 import geopandas as gpd
 import xarray as xr
-import numpy as np
 from shapely.geometry import Point
+import rasterio
+from rasterio import transform
+from rasterio.mask import mask
+import numpy as np
 
-# Load the shapefile using geopandas
-shapefile_path = "../masks/NUTS3/NUTS250_N3.shp"  # Replace with your shapefile path
+# Load shapefile and ensure CRS matches the NetCDF
+shapefile_path = "../masks/NUTS3/NUTS250_N3.shp"
 gdf = gpd.read_file(shapefile_path)
 netcdf_crs = "EPSG:4326"
-print(gdf.crs)
 gdf = gdf.to_crs(netcdf_crs)
-print(gdf.crs)
 
-# Load the NetCDF dataset using xarray
+# Load NetCDF dataset (if you need data from it later)
 netcdf_path = "../climate_data/amber/2020/zalf_pr_amber_2020_v1-0.nc"
-# Replace with your NetCDF path
 ds = xr.open_dataset(netcdf_path)
 
-# Select the region you want to extract data for (e.g., by index or name)
-region_index = 0  # Replace with the index or name of your target region
+# Load GeoTIFF
+crop_mask_file = "../masks/CropMasks/CTM_2018_WiWh_EPSG4326_654_866_1000m.tif"
 
-selected_region = gdf.iloc[region_index]
+# Create the dictionary to store results
+valid_lat_lon_by_nuts = {}
 
-print(selected_region)
+# Use spatial indexing to speed up intersection checks
+gdf.sindex
 
-# Create a boolean mask indicating points within the selected region
-lon, lat = np.meshgrid(ds["lon"], ds["lat"])
-mask = np.array(
-    [
-        selected_region.geometry.contains(Point(lon_val, lat_val))
-        for lon_val, lat_val in zip(lon.flatten(), lat.flatten())
-    ]
-)
-mask = mask.reshape(lon.shape)
+with rasterio.open(crop_mask_file) as src:
+    for index, row in gdf.iterrows():
+        nuts_code = row["NUTS_CODE"]
+        geometry = row["geometry"]
 
-# Extract the latitude and longitude values using the mask
-lat_within_region = lat[mask]  # Index the lat grid directly
-lon_within_region = lon[mask]  # Index the lon grid directly
+        # Crop the raster data to the bounding box of the current NUTS region
+        crop_mask, crop_transform = mask(src, [geometry], crop=True)
 
-print("Latitudes within region:\n", lat_within_region)
-print("Longitudes within region:\n", lon_within_region)
+        # Find the valid pixels within the cropped region
+        valid_pixels = np.where(crop_mask[0] == 1)
 
-# You can now use these lat/lon combinations to extract data from your NetCDF file
-# data_within_region = ds["your_variable_name"].where(mask)
+        # Convert pixel coordinates to lat/lon
+        lons, lats = transform.xy(crop_transform, valid_pixels[0], valid_pixels[1])
+
+        valid_lat_lon_by_nuts.setdefault(nuts_code, []).extend(zip(lats, lons))
+
+# Print or use the dictionary
+# print(valid_lat_lon_by_nuts)
+
+print(valid_lat_lon_by_nuts["DEG0N"])
