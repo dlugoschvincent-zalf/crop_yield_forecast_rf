@@ -1,100 +1,111 @@
 import xarray as xr
 import numpy as np
 from scipy.stats import gamma
-import scipy.stats as stats
 import matplotlib.pyplot as plt
 import subprocess
+from scipy.stats import gamma, norm
+from dask.distributed import Client
 
 
-def calculate_spi_dataset(ds: xr.Dataset, scale, variable_name="pr", max_points=100):
+def calculate_monthly_spi_chunk(chunk: xr.DataArray, month: int) -> xr.DataArray:
     """
-    Calculates the Standardized Precipitation Index (SPI) and adds it as a new variable to the input dataset.
+    Calculates the Standardized Precipitation Index (SPI) for a specific month
+    across all years in a chunk of precipitation data.
 
     Args:
-        ds (xr.Dataset): The input dataset containing precipitation data.
-        scale (int): Time scale in months for SPI calculation.
-        min_valid_points (int): Minimum number of valid data points for SPI calculation.
-        variable_name (str): The name of the precipitation variable in the dataset.
-        max_points (int, optional): Maximum number of grid points to process. If None, processes all points.
+        chunk (xr.DataArray): A chunk of precipitation data with dimensions
+                              (time, lat, lon).
+        month (int): The month for which to calculate SPI (1=January, 12=December).
 
     Returns:
-        xr.Dataset: The input dataset with a new variable 'spi' containing SPI values.
+        xr.DataArray: A chunk of SPI values for the specified month, with
+                      dimensions (time, lat, lon).
     """
 
-    precip = ds[variable_name]
-    precip_rolling = precip.rolling(time=scale, center=False).sum()
-    spi = xr.full_like(precip_rolling, np.nan)
+    spi_chunk = xr.full_like(chunk, np.nan)
 
-    count = 0  # Initialize point counter
-    for lat in precip.lat:
-        for lon in precip.lon:
-            if max_points is not None and count >= max_points:
-                print("Reached maximum point limit. Exiting loop.")
-                ds["spi"] = spi  # Assign to the 'spi' variable in the original dataset
-                return ds
+    for lat in chunk.lat:
+        for lon in chunk.lon:
+            # Select data for the specified month at this grid point
+            precip_monthly = chunk.sel(lat=lat, lon=lon).sel(
+                time=chunk.time.dt.month == month
+            )
 
-            precip_point = precip_rolling.sel(lat=lat, lon=lon)
-            valid_data = precip_point.dropna("time")
+            # Remove missing values
+            valid_data = precip_monthly.dropna("time")
 
-            if not valid_data.values.size:
-                spi.loc[dict(lat=lat, lon=lon)] = np.nan
+            # Skip if no valid data for this month at this grid point
+            if not valid_data.size:
                 continue
 
-            # print(f"Lat:{lat.data}, Lon: {lon.data}")
-
+            # Fit a Gamma distribution to the valid monthly precipitation data
             params = gamma.fit(valid_data)
-            cdf = gamma.cdf(precip_point, *params)
-            spi.loc[dict(lat=lat, lon=lon)] = stats.norm.ppf(cdf, loc=0, scale=1)
 
-            count += 1
+            # Calculate the CDF of the monthly precipitation values
+            cdf = gamma.cdf(precip_monthly, *params)
 
-    ds["spi"] = spi  # Assign SPI data to the new 'spi' variable
+            # Transform CDF into SPI values
+            spi_chunk.loc[dict(lat=lat, lon=lon, time=precip_monthly.time)] = norm.ppf(
+                cdf, loc=0, scale=1
+            )
 
-    return ds
+    return spi_chunk
 
 
-# Example usage:
-ds = xr.open_mfdataset(
-    [
-        "../climate_data/amber/2015/zalf_pr_amber_2015_v1-0.nc",
-        "../climate_data/amber/2016/zalf_pr_amber_2016_v1-0.nc",
-        "../climate_data/amber/2017/zalf_pr_amber_2017_v1-0.nc",
-        "../climate_data/amber/2018/zalf_pr_amber_2018_v1-0.nc",
-        "../climate_data/amber/2019/zalf_pr_amber_2019_v1-0.nc",
-        "../climate_data/amber/2020/zalf_pr_amber_2020_v1-0.nc",
-        "../climate_data/amber/2021/zalf_pr_amber_2021_v1-0.nc",
-        "../climate_data/amber/2022/zalf_pr_amber_2022_v1-0.nc",
-        "../climate_data/amber/2023/zalf_pr_amber_2023_v1-0.nc",
-    ]
-)
-ds.load()
-ds = calculate_spi_dataset(ds, scale=90, variable_name="pr", max_points=100)
+if __name__ == "__main__":
+    client = Client()
 
-# Now the original 'ds' dataset has a new variable called 'spi'
+    # Open the NetCDF file with chunking
+    ds = xr.open_dataset("./allyears_uncompressed.nc", chunks={"lat": 25, "lon": 25})
 
-np.set_printoptions(suppress=True)
-print(len(ds["spi"].sel(lat="54.908170918201535", lon="8.70730856035551").values))
-ds["spi"].sel(lat="54.908170918201535", lon="8.70730856035551").to_dataframe().to_csv(
-    "54.908170918201535_8.70730856035551_2018_rolling_90days.csv"
-)
+    # Select spatial subset
+    lat_min, lat_max = 100, 200
+    lon_min, lon_max = 100, 200
+    ds = ds.isel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
 
-# Select the specific point (latitude, longitude)
-selected_lat = "54.908170918201535"
-selected_lon = "8.70730856035551"
-spi_point = ds["spi"].sel(lat=selected_lat, lon=selected_lon)
+    # Calculate monthly SPI for each month
+    spi_monthly = []
+    for month in range(1, 13):  # Iterate over months 1 to 12
+        spi_month = xr.map_blocks(calculate_monthly_spi_chunk, ds["pr"], args=[month])
+        spi_monthly.append(spi_month.compute(client=client))
 
-# Create the time series plot
-plt.figure(figsize=(12, 6))
-plt.plot(spi_point.time, spi_point.values)
+    # Combine monthly SPI results into a single Dataset
+    spi_ds = xr.Dataset(
+        {f"spi_{month:02d}": spi for month, spi in enumerate(spi_monthly, start=1)},
+        coords={"time": ds.time, "lat": ds.lat, "lon": ds.lon},
+    )
 
-plt.title(f"3-Month SPI at Latitude: {selected_lat}, Longitude: {selected_lon}")
-plt.xlabel("Time")
-plt.ylabel("SPI")
-plt.grid(True)
-plt.axhline(
-    y=0, color="black", linestyle="--", linewidth=0.8
-)  # Add a horizontal line at SPI=0
+    # --- Saving the SPI Data ---
+    # Add metadata attributes to the SPI variables
+    for month in range(1, 13):
+        spi_ds[f"spi_{month:02d}"].attrs[
+            "standart_name"
+        ] = "standardized_precipitation_index"
+        spi_ds[f"spi_{month:02d}"].attrs["units"] = "unitless"
+        spi_ds[f"spi_{month:02d}"].attrs[
+            "long_name"
+        ] = f"Standardized Precipitation Index (monthly, month={month:02d})"
 
-# plt.show()
-plt.savefig("tmp.png")
-subprocess.call(["kitty", "+kitten", "icat", "--align", "left", "tmp.png"])
+    # Save the SPI data to a new NetCDF file
+    spi_ds.to_netcdf("spi_data_monthly.nc")
+
+    spi_entry = spi_ds["spi"].isel(lat=80, lon=80)
+
+    spi_entry.to_dataframe().to_csv("120_120_rolling_90days.csv")
+
+    # Create the time series plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(spi_entry.time, spi_entry.values)
+
+    plt.title(
+        f"3-Month SPI at Latitude: {spi_entry.lat.data}, Longitude: {spi_entry.lon.data}"
+    )
+    plt.xlabel("Time")
+    plt.ylabel("SPI")
+    plt.grid(True)
+    plt.axhline(
+        y=0, color="black", linestyle="--", linewidth=0.8
+    )  # Add a horizontal line at SPI=0
+
+    plt.savefig("tmp.png")
+    subprocess.call(["kitty", "+kitten", "icat", "--align", "left", "tmp.png"])
