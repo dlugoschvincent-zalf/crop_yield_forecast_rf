@@ -91,19 +91,39 @@ def plot_results(y_test, y_pred, filename_suffix=""):
     plt.close()
 
 
-def pivot_dataframe(df, variables) -> pd.DataFrame:
-    """Pivots the given DataFrame for the specified variables.
+def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
+    """Pivots the given DataFrame for the specified variables,
+    handling both monthly and weekly data in a single output.
 
     Args:
         df (pd.DataFrame): The DataFrame to pivot.
         variables (list): A list of variables to pivot.
+                          Variable names should follow the pattern
+                          'variable_timescale' (e.g., 'gdd_monthly').
 
     Returns:
-        pd.DataFrame: The pivoted DataFrame.
+        pd.DataFrame: The pivoted DataFrame containing both monthly
+                       and weekly pivoted data.
     """
 
     dfs = []
     for var in variables:
+        # Extract time scale from variable name
+        time_scale = var.split("_")[-1]  # Get 'monthly' or 'weekly'
+
+        if time_scale not in ["monthly", "weekly"]:
+            raise ValueError(
+                f"Invalid time_scale in variable name: {var}. "
+                "Use 'monthly' or 'weekly'."
+            )
+
+        if time_scale == "monthly":
+            pivot_columns = [f"{var}_{i}" for i in range(1, 10)]  # Months 1-9
+            pivot_on = "month"
+        else:  # time_scale == 'weekly'
+            pivot_columns = [f"{var}_{i}" for i in range(1, 40)]  # Weeks 1-39
+            pivot_on = "week"
+
         df_temp = df.pivot_table(
             index=[
                 "nuts_id",
@@ -123,7 +143,7 @@ def pivot_dataframe(df, variables) -> pd.DataFrame:
                 "mean_yearly_tas",
                 "mean_yearly_sfcWind",
             ],
-            columns="month",
+            columns=pivot_on,
             values=var,
             aggfunc="first",
         ).reset_index()
@@ -145,10 +165,11 @@ def pivot_dataframe(df, variables) -> pd.DataFrame:
             "mean_yearly_tasmax",
             "mean_yearly_tas",
             "mean_yearly_sfcWind",
-        ] + [f"{var}_month_{i}" for i in range(1, 10)]
+        ] + pivot_columns
 
         dfs.append(df_temp)
 
+    # Merge all pivoted data into a single DataFrame
     df_final = dfs[0]
     for i in range(1, len(dfs)):
         df_final = pd.merge(
@@ -180,7 +201,7 @@ def pivot_dataframe(df, variables) -> pd.DataFrame:
 # Load and preprocess data
 ds = xr.open_dataset("../output/all_inputs_aggregated_on_nuts_big.nc")
 df_relevant_data = (
-    ds.sel(year=slice(2007, 2021), month=slice(1, 9))
+    ds.sel(year=slice(2007, 2021), month=slice(1, 9), week=slice(1, 39))
     .to_dataframe()
     .dropna()
     .reset_index()
@@ -201,13 +222,13 @@ df_test = pd.DataFrame(
 # Calculate training data yearly regional means for climate data
 train_yearly_climate_means = pd.DataFrame(
     df_train.groupby(["year", "nuts_id"]).agg(
-        mean_yearly_pr=("pr", "mean"),
-        mean_yearly_rsds=("rsds", "mean"),
-        mean_yearly_tasmax=("tasmax", "mean"),
-        mean_yearly_tasmin=("tasmin", "mean"),
-        mean_yearly_tas=("tas", "mean"),
-        mean_yearly_hurs=("hurs", "mean"),
-        mean_yearly_sfcWind=("sfcWind", "mean"),
+        mean_yearly_pr=("pr_monthly", "mean"),
+        mean_yearly_rsds=("rsds_monthly", "mean"),
+        mean_yearly_tasmax=("tasmax_monthly", "mean"),
+        mean_yearly_tasmin=("tasmin_monthly", "mean"),
+        mean_yearly_tas=("tas_monthly", "mean"),
+        mean_yearly_hurs=("hurs_monthly", "mean"),
+        mean_yearly_sfcWind=("sfcWind_monthly", "mean"),
         mean_yearly_frost_days=("frost_days_monthly", "mean"),
     )
 )
@@ -215,13 +236,13 @@ train_yearly_climate_means = pd.DataFrame(
 # Calculate full dataset yearly regional means for climate data (for test set)
 full_yearly_climate_means = pd.DataFrame(
     df_relevant_data.groupby(["year", "nuts_id"]).agg(
-        mean_yearly_pr=("pr", "mean"),
-        mean_yearly_rsds=("rsds", "mean"),
-        mean_yearly_tasmax=("tasmax", "mean"),
-        mean_yearly_tasmin=("tasmin", "mean"),
-        mean_yearly_tas=("tas", "mean"),
-        mean_yearly_hurs=("hurs", "mean"),
-        mean_yearly_sfcWind=("sfcWind", "mean"),
+        mean_yearly_pr=("pr_monthly", "mean"),
+        mean_yearly_rsds=("rsds_monthly", "mean"),
+        mean_yearly_tasmax=("tasmax_monthly", "mean"),
+        mean_yearly_tasmin=("tasmin_monthly", "mean"),
+        mean_yearly_tas=("tas_monthly", "mean"),
+        mean_yearly_hurs=("hurs_monthly", "mean"),
+        mean_yearly_sfcWind=("sfcWind_monthly", "mean"),
         mean_yearly_frost_days=("frost_days_monthly", "mean"),
     )
 )
@@ -281,22 +302,22 @@ variables_to_pivot = [
     "days_in_95_percentile_rsds_monthly",
     "days_in_90_percentile_sfcWind_monthly",
     "days_in_95_percentile_sfcWind_monthly",
-    # "gdd_weekly",
-    # "frost_days_weekly",
-    # "days_max_temp_above_28_weekly",
-    # "days_avg_temp_above_28_weekly",
-    # "days_in_97_5_percentile_tas_weekly",
-    # "days_in_95_percentile_pr_weekly",
-    # "days_in_95_percentile_rsds_weekly",
-    # "days_in_90_percentile_sfcWind_weekly",
-    # "days_in_95_percentile_sfcWind_weekly",
-    "pr",
-    "rsds",
-    "tasmax",
-    "hurs",
-    "tas",
-    "sfcWind",
-    "tasmin",
+    "gdd_weekly",
+    "frost_days_weekly",
+    "days_max_temp_above_28_weekly",
+    "days_avg_temp_above_28_weekly",
+    "days_in_97_5_percentile_tas_weekly",
+    "days_in_95_percentile_pr_weekly",
+    "days_in_95_percentile_rsds_weekly",
+    "days_in_90_percentile_sfcWind_weekly",
+    "days_in_95_percentile_sfcWind_weekly",
+    "pr_monthly",
+    "rsds_monthly",
+    "tasmax_monthly",
+    "hurs_monthly",
+    "tas_monthly",
+    "sfcWind_monthly",
+    "tasmin_monthly",
 ]
 
 df_train = pivot_dataframe(df_train, variables_to_pivot)
@@ -326,7 +347,7 @@ features_to_consider = (
         # "mean_regional_pr",
         # "mean_regional_frost_days",
         # "mean_regional_ww_yield_anomaly_percent_weighted",
-        "mean_regional_ww_yield",
+        # "mean_regional_ww_yield",
         # "spi",
         # "gdd",
         # "frost_days",
@@ -339,16 +360,22 @@ features_to_consider = (
         # "month",
     ]
     # + [f"spi_month_{i}" for i in range(1, 10)]
-    # + [f"gdd_month_{i}" for i in range(1, 10)]
-    # + [f"frost_days_month_{i}" for i in range(1, 10)]
-    # + [f"exceedance_days_month_{i}" for i in range(1, 10)]
-    # + [f"rsds_month_{i}" for i in range(1, 10)]
-    # # + [f"pr_month_{i}" for i in range(1, 10)]
-    # # + [f"tasmax_month_{i}" for i in range(1, 10)]
-    # # + [f"tasmin_month_{i}" for i in range(1, 10)]
-    # + [f"tas_month_{i}" for i in range(1, 10)]
-    # + [f"hurs_month_{i}" for i in range(1, 10)]
-    # + [f"sfcWind_month_{i}" for i in range(1, 10)]
+    + [f"gdd_monthly_month_{i}" for i in range(1, 10)]
+    + [f"frost_days_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_max_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_avg_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_97_5_percentile_tas_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_95_percentile_pr_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_95_percentile_rsds_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_90_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_95_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    + [f"rsds_monthly_month_{i}" for i in range(1, 10)]
+    + [f"pr_monthly_month_{i}" for i in range(1, 10)]
+    + [f"tasmax_monthly_month_{i}" for i in range(1, 10)]
+    + [f"tasmin_monthly_month_{i}" for i in range(1, 10)]
+    + [f"tas_monthly_month_{i}" for i in range(1, 10)]
+    + [f"hurs_monthly_month_{i}" for i in range(1, 10)]
+    + [f"sfcWind_monthly_month_{i}" for i in range(1, 10)]
 )
 
 
