@@ -5,6 +5,7 @@ from rasterio import transform
 from rasterio.mask import mask
 import numpy as np
 import pandas as pd
+from dask.distributed import Client
 
 
 def calculate_yield_anomaly(ds):
@@ -56,172 +57,270 @@ def calculate_yield_anomaly(ds):
     return ds
 
 
-# Read and prepare the data
+if __name__ == "__main__":
+    client = Client()
 
-# Define file paths
-precip_file = "../output/yearly_avg_precipitation.nc"
-gdd_file = "../output/growing_degree_days.nc"
-frost_days_file = "../output/frost_days.nc"
-spi_file = "../output/spi_data_monthly.nc"
-shapefile_path = "../masks/NUTS3/NUTS250_N3.shp"
-crop_mask_file = "../masks/CropMasks/CTM_2018_WiWh_EPSG4326_654_866_1000m.tif"
-elevation_file = (
-    "../elevation_data/elevation_amber_conform_med_EPSG4326_654_866_1000m.tif"
-)
-yield_file = "../yield_data/Final_data.csv"
-output_file = "../output/all_inputs_aggregated_on_nuts.nc"
+    # Define file paths
+    file_paths = {
+        "spi": "../output/spi_data_monthly.nc",
+        "derived_features_monthly": "../output/combined_climate_indices_monthly.nc",
+        "derived_features_weekly": "../output/combined_climate_indices_weekly.nc",
+        "shapefile": "../masks/NUTS3/NUTS250_N3.shp",
+        "crop_mask": "../masks/CropMasks/CTM_2018_WiWh_EPSG4326_654_866_1000m.tif",
+        "elevation": "../elevation_data/elevation_amber_conform_med_EPSG4326_654_866_1000m.tif",
+        "yield": "../yield_data/Final_data.csv",
+        "output": "../output/all_inputs_aggregated_on_nuts_big.nc",
+        "allyears_monthly_merged": "../output/allyears_uncompressed_monthly_merged.nc",
+    }
 
-# Load datasets
-precip_ds = xr.load_dataset(precip_file)
-gdd_ds = xr.load_dataset(gdd_file)
-frost_days_ds = xr.load_dataset(frost_days_file)
-spi_ds = xr.load_dataset(spi_file)
+    # Load datasets
+    datasets = {
+        "spi": xr.load_dataset(
+            file_paths["spi"],
+            chunks={"times": "auto", "lat": "auto", "lon": "auto"},
+        ),
+        "derived_features_monthly": xr.open_dataset(
+            file_paths["derived_features_monthly"],
+            chunks={"times": "auto", "lat": "auto", "lon": "auto"},
+        ),
+        "derived_features_weekly": xr.open_dataset(
+            file_paths["derived_features_weekly"],
+            chunks={"times": "auto", "lat": "auto", "lon": "auto"},
+        ),
+        "allyears_monthly_merged": xr.load_dataset(
+            file_paths["allyears_monthly_merged"],
+            chunks={"times": "auto", "lat": "auto", "lon": "auto"},
+        ),
+    }
 
-# Load shapefile and ensure CRS matches the NetCDF
-gdf = gpd.GeoDataFrame(gpd.read_file(filename=shapefile_path))
-netcdf_crs = "EPSG:4326"
-gdf = gdf.to_crs(netcdf_crs)
+    # remove the 53rd week now. Before finding a better solution
+    datasets["derived_features_weekly"] = datasets["derived_features_weekly"].where(
+        datasets["derived_features_weekly"].time.dt.isocalendar().week != 53, drop=True
+    )
 
-# Load yield data
-df = pd.read_csv(yield_file)
+    # Load shapefile and ensure CRS matches the NetCDF
+    gdf = gpd.read_file(file_paths["shapefile"]).to_crs("EPSG:4326")
 
-# Create dictionaries to store results
-valid_coords_by_nuts = {}  # Store valid lat/lon pairs for each NUTS region
-avg_elevation_by_nuts = {}
-mean_spi_by_nuts = {}
-mean_precip_by_nuts = {}
-mean_gdd_by_nuts = {}
-mean_frost_days_by_nuts = {}
+    # Load yield data
+    df = pd.read_csv(file_paths["yield"])
 
+    # Create dictionaries to store results
+    result_dicts = {
+        "valid_coords_by_nuts": {},
+        "avg_elevation_by_nuts": {},
+        "monthly_features": {},
+        "weekly_features": {},
+        "monthly_raw_data": {},
+    }
 
-# Group the GeoDataFrame by NUTS code
-if gdf is None:
-    raise SystemExit("GDF not defined")
+    monthly_features = [
+        "gdd",
+        "frost_days",
+        "days_max_temp_above_28",
+        "days_avg_temp_above_28",
+        "days_in_97_5_percentile_tas",
+        "days_in_95_percentile_pr",
+        "days_in_95_percentile_rsds",
+        "days_in_90_percentile_sfcWind",
+        "days_in_95_percentile_sfcWind",
+    ]
 
-nuts_groups = gdf.groupby("NUTS_CODE")
+    weekly_features = [
+        "gdd",
+        "frost_days",
+        "days_max_temp_above_28",
+        "days_avg_temp_above_28",
+        "days_in_97_5_percentile_tas",
+        "days_in_95_percentile_pr",
+        "days_in_95_percentile_rsds",
+        "days_in_90_percentile_sfcWind",
+        "days_in_95_percentile_sfcWind",
+    ]
 
-# Open raster files for masking
-with rasterio.open(crop_mask_file) as crop_mask, rasterio.open(
-    elevation_file
-) as elev_raster:
-    # Iterate over each NUTS region
-    for nuts_code, nuts_group in nuts_groups:
-        # Combine geometries for the current NUTS code
-        combined_geometry = nuts_group["geometry"].union_all()
+    monthly_raw_data = ["rsds", "pr", "hurs", "tasmax", "tasmin", "tas", "sfcWind"]
 
-        # Mask and crop raster data
-        crop_mask_data, crop_transform = mask(crop_mask, [combined_geometry], crop=True)
-        elev_data, _ = mask(elev_raster, [combined_geometry], crop=True)
+    # Initialize result dictionaries
+    for feature in monthly_features:
+        result_dicts["monthly_features"][feature] = {}
+    result_dicts["monthly_features"]["spi"] = {}
+    for feature in weekly_features:
+        result_dicts["weekly_features"][feature] = {}
 
-        # Find valid pixel coordinates within the crop mask
-        valid_pixels = np.where(crop_mask_data[0] == 1)
-        lons, lats = transform.xy(crop_transform, valid_pixels[0], valid_pixels[1])
-        valid_coords_by_nuts[nuts_code] = list(zip(lats, lons))
+    for variable in monthly_raw_data:
+        result_dicts["monthly_raw_data"][variable] = {}
 
-        # Calculate average elevation for valid pixels
-        masked_elev = np.ma.masked_where(crop_mask_data[0] == 0, elev_data[0])
-        avg_elevation_by_nuts[nuts_code] = np.ma.mean(masked_elev)
+    # Group the GeoDataFrame by NUTS code
+    nuts_groups = gdf.groupby("NUTS_CODE")
 
-        # Process time series data if enough valid points are available
-        if len(valid_coords_by_nuts[nuts_code]) >= 10:
-            # Function to extract and average time series data
-            def extract_and_average(dataset, variable_name):
-                time_series_list = []
-                for lat, lon in valid_coords_by_nuts[nuts_code]:
-                    time_series = dataset[variable_name].sel(
-                        lat=lat, lon=lon, method="nearest"
+    delayed_computations = []
+    # Open raster files for masking
+    with rasterio.open(file_paths["crop_mask"]) as crop_mask, rasterio.open(
+        file_paths["elevation"]
+    ) as elev_raster:
+        # Iterate over each NUTS region
+        for nuts_code, nuts_group in nuts_groups:
+            print(nuts_code)
+            # Combine geometries for the current NUTS code
+            combined_geometry = nuts_group["geometry"].union_all()
+
+            # Mask and crop raster data
+            crop_mask_data, crop_transform = mask(
+                crop_mask, [combined_geometry], crop=True
+            )
+            elev_data, _ = mask(elev_raster, [combined_geometry], crop=True)
+
+            # Find valid pixel coordinates within the crop mask
+            valid_pixels = np.where(crop_mask_data[0] == 1)
+            lons, lats = transform.xy(crop_transform, valid_pixels[0], valid_pixels[1])
+            result_dicts["valid_coords_by_nuts"][nuts_code] = list(zip(lats, lons))
+
+            # Calculate average elevation for valid pixels
+            masked_elev = np.ma.masked_where(crop_mask_data[0] == 0, elev_data[0])
+            result_dicts["avg_elevation_by_nuts"][nuts_code] = np.ma.mean(masked_elev)
+
+            # Process time series data if enough valid points are available
+            if len(result_dicts["valid_coords_by_nuts"][nuts_code]) >= 10:
+
+                def extract_and_average(dataset: xr.Dataset, variable_name: str):
+                    time_series_list = [
+                        dataset[variable_name].sel(lat=lat, lon=lon, method="nearest")
+                        for lat, lon in result_dicts["valid_coords_by_nuts"][nuts_code]
+                    ]
+                    return xr.concat(time_series_list, dim="point").mean(
+                        dim="point", skipna=True
                     )
-                    time_series_list.append(time_series)
-                time_series_array = xr.concat(time_series_list, dim="point")
-                return time_series_array.mean(dim="point", skipna=True)
 
-            # Extract and store time series data
-            mean_spi_by_nuts[nuts_code] = extract_and_average(spi_ds, "spi")
+                result_dicts["monthly_features"]["spi"][nuts_code] = (
+                    extract_and_average(datasets["spi"], "spi").compute(client=client)
+                )
+                # Extract and store time series data
+                for feature in monthly_features:
+                    result_dicts["monthly_features"][feature][nuts_code] = (
+                        extract_and_average(
+                            datasets["derived_features_monthly"], f"{feature}_month"
+                        ).compute(client=client)
+                    )
 
-            mean_precip_by_nuts[nuts_code] = extract_and_average(
-                precip_ds, "yearly_avg_precipitation"
-            )
+                for feature in weekly_features:
+                    result_dicts["weekly_features"][feature][nuts_code] = (
+                        extract_and_average(
+                            datasets["derived_features_weekly"], f"{feature}_week"
+                        ).compute(client=client)
+                    )
 
-            mean_gdd_by_nuts[nuts_code] = extract_and_average(gdd_ds, "gdd")
+                for variable in monthly_raw_data:
+                    result_dicts["monthly_raw_data"][variable][nuts_code] = (
+                        extract_and_average(
+                            datasets["allyears_monthly_merged"], variable
+                        )
+                    ).compute(client=client)
 
-            mean_frost_days_by_nuts[nuts_code] = extract_and_average(
-                frost_days_ds, "frost_days"
-            )
+    # Prepare data for xarray Dataset
+    nuts_ids = list(result_dicts["monthly_features"]["gdd"].keys())
+    time = result_dicts["monthly_features"]["gdd"][nuts_ids[0]].time
+    years = time.dt.year.values
+    months = time.dt.month.values
 
+    multi_index = pd.MultiIndex.from_arrays([years, months], names=("year", "month"))
+    print(multi_index)
+    time = result_dicts["weekly_features"]["gdd"][nuts_ids[0]].time
+    years = time.dt.year.values
+    weeks = time.dt.isocalendar().week.values
 
-# Prepare data for xarray Dataset
-nuts_ids = list(mean_spi_by_nuts.keys())
-time = mean_spi_by_nuts[nuts_ids[0]].time
-years = time.dt.year.values
-months = time.dt.month.values
+    multi_index_weekly = pd.MultiIndex.from_arrays(
+        [years, weeks], names=("year", "week")
+    )
 
-# Create multi-index for year and month
-multi_index = pd.MultiIndex.from_arrays([years, months], names=("year", "month"))
+    print(multi_index_weekly)
 
-# Initialize arrays to store data
-spi_values = np.zeros((len(nuts_ids), len(multi_index)))
-precip_values = np.zeros((len(nuts_ids), len(np.unique(years))))
-gdd_values = np.zeros((len(nuts_ids), len(multi_index)))
-frost_days_values = np.zeros((len(nuts_ids), len(multi_index)))
-elevation_values = np.array([avg_elevation_by_nuts[nuts_id] for nuts_id in nuts_ids])
+    # Create arrays for values
+    def create_value_array(feature_dict, multi_index):
+        value_store = np.zeros((len(nuts_ids), len(multi_index)))
+        for i, nuts_id in enumerate(nuts_ids):
+            value_store[i, :] = feature_dict[nuts_id].values
+        return value_store
 
+    # Create multi-index for year and month/week
 
-# Populate data arrays
-for i, nuts_id in enumerate(nuts_ids):
-    spi_values[i, :] = mean_spi_by_nuts[nuts_id].values
-    precip_values[i, :] = mean_precip_by_nuts[nuts_id].values
-    gdd_values[i, :] = mean_gdd_by_nuts[nuts_id].values
-    frost_days_values[i, :] = mean_frost_days_by_nuts[nuts_id].values
+    monthly_values = {
+        feature: create_value_array(
+            result_dicts["monthly_features"][feature], multi_index
+        )
+        for feature in monthly_features
+    }
+    weekly_values = {
+        feature: create_value_array(
+            result_dicts["weekly_features"][feature], multi_index_weekly
+        )
+        for feature in weekly_features
+    }
+    raw_data_values = {
+        variable: create_value_array(
+            result_dicts["monthly_raw_data"][variable], multi_index
+        )
+        for variable in monthly_raw_data
+    }
 
-# Create xarray Dataset
-aggregated_ds = xr.Dataset(
-    {
-        "spi": (
-            ["nuts_id", "year", "month"],
-            spi_values.reshape(len(nuts_ids), -1, 12),
-        ),
+    elevation_values = np.array(
+        [result_dicts["avg_elevation_by_nuts"][nuts_id] for nuts_id in nuts_ids]
+    )
+
+    # Create xarray Dataset
+    data_vars = {
         "elevation": (["nuts_id"], elevation_values),
-        "precip": (["nuts_id", "year"], precip_values),
-        "gdd": (
-            ["nuts_id", "year", "month"],
-            gdd_values.reshape(len(nuts_ids), -1, 12),
-        ),
-        "frost_days": (
-            ["nuts_id", "year", "month"],
-            frost_days_values.reshape(len(nuts_ids), -1, 12),
-        ),
-    },
-    coords={"nuts_id": nuts_ids, "year": np.unique(years), "month": np.arange(1, 13)},
-)
+        **{
+            f"{feature}_monthly": (
+                ["nuts_id", "year", "month"],
+                monthly_values[feature].reshape(len(nuts_ids), -1, 12),
+            )
+            for feature in monthly_features
+        },
+        **{
+            f"{feature}_weekly": (
+                ["nuts_id", "year", "week"],
+                weekly_values[feature].reshape(len(nuts_ids), -1, 52),
+            )
+            for feature in weekly_features
+        },
+        **{
+            variable: (
+                ["nuts_id", "year", "month"],
+                raw_data_values[variable].reshape(len(nuts_ids), -1, 12),
+            )
+            for variable in monthly_raw_data
+        },
+    }
 
-# Prepare wheat yield data
-ww_yield = (
-    df.query("var == 'ww' and measure == 'yield'")
-    .rename(columns={"value": "ww_yield"})
-    .set_index(["nuts_id", "year"])[["ww_yield"]]
-)
+    aggregated_ds = xr.Dataset(
+        data_vars,
+        coords={
+            "nuts_id": nuts_ids,
+            "year": np.unique(years),
+            "month": np.arange(1, 13),
+            "week": np.arange(1, 53),
+        },
+    )
 
-# Prepare arable land data
-arab_land = (
-    df.query("var == 'ArabLand' and measure == 'area'")
-    .rename(columns={"value": "ArabLand"})
-    .set_index(["nuts_id", "year"])[["ArabLand"]]
-)
+    # Prepare wheat yield data
+    ww_yield = (
+        df.query("var == 'ww' and measure == 'yield'")
+        .rename(columns={"value": "ww_yield"})
+        .set_index(["nuts_id", "year"])[["ww_yield"]]
+    )
+    arab_land = (
+        df.query("var == 'ArabLand' and measure == 'area'")
+        .rename(columns={"value": "ArabLand"})
+        .set_index(["nuts_id", "year"])[["ArabLand"]]
+    )
+    yield_df = pd.merge(ww_yield, arab_land, left_index=True, right_index=True)
 
-# Merge the yield dataframes
-yield_df = pd.merge(ww_yield, arab_land, left_index=True, right_index=True)
+    # Convert to xarray Dataset and calculate yield anomalies
+    yield_ds = calculate_yield_anomaly(xr.Dataset.from_dataframe(yield_df))
 
-# Convert to xarray Dataset
-yield_ds = xr.Dataset.from_dataframe(yield_df)
+    # Merge datasets and save to NetCDF
+    ds_final = xr.merge([aggregated_ds, yield_ds])
+    ds_final.to_netcdf(file_paths["output"])
 
-# Calculate and add the yield anomalies
-yield_ds = calculate_yield_anomaly(yield_ds)
-
-ds_final = xr.merge([aggregated_ds, yield_ds])
-
-# Save the dataset to a NetCDF file
-ds_final.to_netcdf(output_file)
-
-# Verify the structure of the saved NetCDF file
-test_ds = xr.open_dataset(output_file)
-print(test_ds)
+    # Verify the structure of the saved NetCDF file
+    test_ds = xr.open_dataset(file_paths["output"])
+    print(test_ds)
