@@ -1,3 +1,4 @@
+from sklearn.tree import ExtraTreeRegressor
 import xarray as xr
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
@@ -7,7 +8,7 @@ from sklearn.model_selection import (
     train_test_split,
     TimeSeriesSplit,
 )
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
 from sklearn.metrics import (
     mean_squared_error,
     r2_score,
@@ -16,6 +17,8 @@ from sklearn.metrics import (
 )
 import numpy as np
 import matplotlib.pyplot as plt
+
+import xgboost as xgb
 
 # Supress scientific notation
 np.set_printoptions(suppress=True)
@@ -118,10 +121,10 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
             )
 
         if time_scale == "monthly":
-            pivot_columns = [f"{var}_{i}" for i in range(1, 10)]  # Months 1-9
+            pivot_columns = [f"{var}_month_{i}" for i in range(1, 10)]  # Months 1-9
             pivot_on = "month"
         else:  # time_scale == 'weekly'
-            pivot_columns = [f"{var}_{i}" for i in range(1, 40)]  # Weeks 1-39
+            pivot_columns = [f"{var}_week_{i}" for i in range(1, 40)]  # Weeks 1-39
             pivot_on = "week"
 
         df_temp = df.pivot_table(
@@ -250,7 +253,7 @@ full_yearly_climate_means = pd.DataFrame(
 # Calculate training data regional means for climate data
 train_regional_climate_means = pd.DataFrame(
     df_train.groupby("nuts_id").agg(
-        mean_regional_pr=("pr", "mean"),
+        mean_regional_pr=("pr_monthly", "mean"),
         mean_regional_frost_days=("frost_days_monthly", "mean"),
     )
 )
@@ -258,7 +261,7 @@ train_regional_climate_means = pd.DataFrame(
 # Calculate full dataset regional means for climate data (for test set)
 full_regional_climate_means = pd.DataFrame(
     df_relevant_data.groupby("nuts_id").agg(
-        mean_regional_pr=("pr", "mean"),
+        mean_regional_pr=("pr_monthly", "mean"),
         mean_regional_frost_days=("frost_days_monthly", "mean"),
     )
 )
@@ -349,33 +352,57 @@ features_to_consider = (
         # "mean_regional_ww_yield_anomaly_percent_weighted",
         # "mean_regional_ww_yield",
         # "spi",
-        # "gdd",
-        # "frost_days",
-        # "exceedance_days",
-        # "tas",
-        # "rsds",
-        # "pr",
-        # "hurs",
-        # "sfcWind",
-        # "month",
+        # "gdd_monthly",
+        # "frost_days_monthly",
+        # "days_max_temp_above_28_monthly",
+        # "days_avg_temp_above_28_monthly",
+        # "days_in_97_5_percentile_tas_monthly",
+        # "days_in_95_percentile_pr_monthly",
+        # "days_in_95_percentile_rsds_monthly",
+        # "days_in_90_percentile_sfcWind_monthly",
+        # "days_in_95_percentile_sfcWind_monthly",
+        # "gdd_weekly",
+        # "days_max_temp_above_28_weekly",
+        # "days_avg_temp_above_28_weekly",
+        # "days_in_97_5_percentile_tas_weekly",
+        # "days_in_95_percentile_pr_weekly",
+        # "days_in_95_percentile_rsds_weekly",
+        # "days_in_90_percentile_sfcWind_weekly",
+        # "days_in_95_percentile_sfcWind_weekly",
+        # "frost_days_weekly",
+        # "tas_monthly",
+        # "rsds_monthly",
+        # "pr_monthly",
+        # "hurs_monthly",
+        # "sfcWind_monthly",
+        # "month_monthly",
     ]
     # + [f"spi_month_{i}" for i in range(1, 10)]
-    + [f"gdd_monthly_month_{i}" for i in range(1, 10)]
-    + [f"frost_days_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_max_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_avg_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_in_97_5_percentile_tas_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_in_95_percentile_pr_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_in_95_percentile_rsds_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_in_90_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
-    + [f"days_in_95_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
-    + [f"rsds_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"gdd_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"frost_days_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_max_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_avg_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_in_97_5_percentile_tas_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_in_95_percentile_pr_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_in_95_percentile_rsds_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_in_90_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"days_in_95_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"gdd_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"frost_days_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_max_temp_above_28_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_avg_temp_above_28_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_in_97_5_percentile_tas_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_in_95_percentile_pr_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_in_95_percentile_rsds_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_in_90_percentile_sfcWind_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_in_95_percentile_sfcWind_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"rsds_monthly_month_{i}" for i in range(1, 10)]
     + [f"pr_monthly_month_{i}" for i in range(1, 10)]
-    + [f"tasmax_monthly_month_{i}" for i in range(1, 10)]
-    + [f"tasmin_monthly_month_{i}" for i in range(1, 10)]
-    + [f"tas_monthly_month_{i}" for i in range(1, 10)]
-    + [f"hurs_monthly_month_{i}" for i in range(1, 10)]
-    + [f"sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"tasmax_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"tasmin_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"tas_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"hurs_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"sfcWind_monthly_month_{i}" for i in range(1, 10)]
 )
 
 
@@ -403,19 +430,22 @@ y_train = y_train.sort_index()
 
 # Hyperparameter grid for RandomizedSearchCV
 param_grid = {
-    "max_features": [0.5],
-    "n_estimators": [100],
+    "n_estimators": [500],
 }
 
 
 # Create the Random Forest model
-# rf = RandomForestRegressor()
+rf = RandomForestRegressor()
 gdb = GradientBoostingRegressor()
+extra = ExtraTreeRegressor()
+xgb_model = xgb.XGBRegressor(
+    # early_stopping_rounds=10,
+)
 
 tscv = TimeSeriesSplit(n_splits=5)
 # Use RandomizedSearchCV for hyperparameter optimization
 grid_search = GridSearchCV(
-    estimator=gdb,
+    estimator=rf,
     param_grid=param_grid,
     scoring="neg_root_mean_squared_error",
     cv=tscv,
@@ -423,7 +453,11 @@ grid_search = GridSearchCV(
     verbose=2,
 )
 
-grid_search.fit(X_train, y_train)
+grid_search.fit(
+    X_train,
+    y_train,
+    # eval_set=[(X_test_excluded_years, y_test_excluded_years)]
+)
 
 pd.DataFrame(grid_search.cv_results_).to_csv("../output/grid_search_results.csv")
 # Get the best model from hyperparameter tuning
@@ -555,7 +589,11 @@ n_estimators_values.sort()
 # Calculate RMSE for each value of n_estimators
 for n_estimators in n_estimators_values:
     best_estimator.set_params(n_estimators=n_estimators)
-    best_estimator.fit(X_train, y_train)
+    best_estimator.fit(
+        X_train,
+        y_train,
+        # eval_set=[(X_test_excluded_years, y_test_excluded_years)]
+    )
 
     # Predict on training, validation (using CV results), and test sets
     y_train_pred = best_estimator.predict(X_train)
