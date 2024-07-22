@@ -54,18 +54,12 @@ def calculate_spi_chunk(chunk: xr.DataArray):
 
                 try:
                     # Handle zero values
+                    # If monthly aggregates are zero a zero mask is created to prevent these month to go into the calculation as is. A small epsilon is added to the zeros before fitting the gamma distribution parameters preventing causing a crash in the calculation.
                     zero_mask = month_data.values == 0
-                    if np.all(zero_mask):
-                        continue
+                    month_data.values[zero_mask] = 0.000001
 
-                    if np.any(zero_mask):
-                        non_zero_data = month_data.values[~zero_mask]
-                        params = gamma.fit(non_zero_data, floc=0)
-                        cdf = gamma.cdf(month_data.values, *params)
-                        cdf[zero_mask] = gamma.cdf(np.min(non_zero_data) / 2, *params)
-                    else:
-                        params = gamma.fit(month_data.values, floc=0)
-                        cdf = gamma.cdf(month_data.values, *params)
+                    params = gamma.fit(month_data.values, floc=0)
+                    cdf = gamma.cdf(month_data.values, *params)
 
                     spi_values = norm.ppf(cdf, loc=0, scale=1)
                     spi_chunk.loc[dict(lat=lat, lon=lon, time=month_data.time)] = (
@@ -92,7 +86,7 @@ if __name__ == "__main__":
     client = Client()
     logging.info(f"Dask client initialized: {client}")
 
-    ds = xr.open_dataset("./allyears_uncompressed.nc")
+    ds = xr.open_dataset("../output/allyears_compressed_merged.nc")
     logging.info("Dataset opened successfully")
 
     # Log original data shape
@@ -104,8 +98,9 @@ if __name__ == "__main__":
     logging.info(f"Locations with no data: {no_data_count}")
 
     processed_precip_data = (
-        ds["pr"].resample(time="ME").mean().chunk({"lat": 20, "lon": 20, "time": -1})
+        ds["pr"].resample(time="ME").mean().chunk({"lat": 50, "lon": 50, "time": -1})
     )
+
     logging.info("Precipitation data processed and chunked")
 
     # Log processed data shape
@@ -143,7 +138,8 @@ if __name__ == "__main__":
     )
     spi_ds["spi"].attrs["standard_name"] = "standardized_precipitation_index"
     spi_ds["spi"].attrs["units"] = "unitless"
-    spi_ds["spi"].attrs["long_name"] = "Standardized Precipitation Index (90-day)"
+    spi_ds["spi"].attrs["long_name"] = "Standardized Precipitation Index (Quarterly)"
+    # spi_ds["spi"].attrs["long_name"] = "Standardized Precipitation Index (Monthly)"
 
     # Log SPI data for the sample location
     logging.info(f"SPI data at ({lat}, {lon}):")
