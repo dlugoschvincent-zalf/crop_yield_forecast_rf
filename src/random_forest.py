@@ -1,14 +1,11 @@
-from sklearn.tree import ExtraTreeRegressor
 import xarray as xr
 import pandas as pd
-from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.model_selection import (
-    RandomizedSearchCV,
     GridSearchCV,
     train_test_split,
     TimeSeriesSplit,
 )
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import (
     mean_squared_error,
     r2_score,
@@ -17,8 +14,6 @@ from sklearn.metrics import (
 )
 import numpy as np
 import matplotlib.pyplot as plt
-
-import xgboost as xgb
 
 # Supress scientific notation
 np.set_printoptions(suppress=True)
@@ -114,16 +109,19 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
         # Extract time scale from variable name
         time_scale = var.split("_")[-1]  # Get 'monthly' or 'weekly'
 
-        if time_scale not in ["monthly", "weekly"]:
+        if time_scale not in ["quarterly", "monthly", "weekly"]:
             raise ValueError(
                 f"Invalid time_scale in variable name: {var}. "
                 "Use 'monthly' or 'weekly'."
             )
 
-        if time_scale == "monthly":
+        if time_scale == "quarterly":
+            pivot_columns = [f"{var}_quarter_{i}" for i in range(1, 4)]  # Qurter 1-3
+            pivot_on = "quarter"
+        elif time_scale == "monthly":
             pivot_columns = [f"{var}_month_{i}" for i in range(1, 10)]  # Months 1-9
             pivot_on = "month"
-        else:  # time_scale == 'weekly'
+        else:  # time_scale =="weekly"
             pivot_columns = [f"{var}_week_{i}" for i in range(1, 40)]  # Weeks 1-39
             pivot_on = "week"
 
@@ -131,12 +129,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
             index=[
                 "nuts_id",
                 "year",
-                "elevation",
-                "ww_yield_anomaly_percent_weighted",
-                "ww_yield",
                 "mean_regional_pr",
                 "mean_regional_frost_days",
-                "mean_regional_ww_yield_anomaly_percent_weighted",
                 "mean_regional_ww_yield",
                 "mean_yearly_pr",
                 "mean_yearly_rsds",
@@ -145,6 +139,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
                 "mean_yearly_tasmax",
                 "mean_yearly_tas",
                 "mean_yearly_sfcWind",
+                "ww_yield",
+                "ww_yield_average_detrended",
             ],
             columns=pivot_on,
             values=var,
@@ -154,12 +150,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
         df_temp.columns = [
             "nuts_id",
             "year",
-            "elevation",
-            "ww_yield_anomaly_percent_weighted",
-            "ww_yield",
             "mean_regional_pr",
             "mean_regional_frost_days",
-            "mean_regional_ww_yield_anomaly_percent_weighted",
             "mean_regional_ww_yield",
             "mean_yearly_pr",
             "mean_yearly_rsds",
@@ -168,6 +160,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
             "mean_yearly_tasmax",
             "mean_yearly_tas",
             "mean_yearly_sfcWind",
+            "ww_yield",
+            "ww_yield_average_detrended",
         ] + pivot_columns
 
         dfs.append(df_temp)
@@ -181,12 +175,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
             on=[
                 "nuts_id",
                 "year",
-                "elevation",
-                "ww_yield_anomaly_percent_weighted",
-                "ww_yield",
                 "mean_regional_pr",
                 "mean_regional_frost_days",
-                "mean_regional_ww_yield_anomaly_percent_weighted",
                 "mean_regional_ww_yield",
                 "mean_yearly_pr",
                 "mean_yearly_rsds",
@@ -195,6 +185,8 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
                 "mean_yearly_tasmax",
                 "mean_yearly_tas",
                 "mean_yearly_sfcWind",
+                "ww_yield",
+                "ww_yield_average_detrended",
             ],
         )
 
@@ -202,16 +194,27 @@ def pivot_dataframe(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
 
 
 # Load and preprocess data
-ds = xr.open_dataset("../output/all_inputs_aggregated_on_nuts_big.nc")
+ds = xr.open_dataset(
+    "../output/features/final_data_features_aggregated_on_nuts_inc_spi.nc"
+)
+yield_ds = xr.open_dataset("../output/targets/processed_yield_simpler.nc")
+ds = ds.merge(yield_ds[["ww_yield_average_detrended", "ww_yield"]])
+
+print(ds.data_vars)
 df_relevant_data = (
-    ds.sel(year=slice(2007, 2021), month=slice(1, 9), week=slice(1, 39))
+    ds.sel(
+        year=slice(1979, 2021),
+        month=slice(1, 9),
+        week=slice(1, 39),
+        quarter=slice(1, 3),
+    )
     .to_dataframe()
     .dropna()
     .reset_index()
 )
 
 # Define years to exclude for testing
-years_to_exclude = [2017, 2018, 2019, 2020, 2021]
+years_to_exclude = range(2015, 2022)
 
 # Split into training and test sets based on years
 df_train = pd.DataFrame(
@@ -269,10 +272,6 @@ full_regional_climate_means = pd.DataFrame(
 # Calculate training regional dataset means for yield data (to be used for both train and test)
 regional_yield_means = pd.DataFrame(
     df_train.groupby("nuts_id").agg(
-        mean_regional_ww_yield_anomaly_percent_weighted=(
-            "ww_yield_anomaly_percent_weighted",
-            "mean",
-        ),
         mean_regional_ww_yield=("ww_yield", "mean"),
     )
 )
@@ -295,25 +294,13 @@ df_test = df_test.merge(regional_yield_means, on="nuts_id", how="left")
 
 # --- Pivoting the Data ---
 variables_to_pivot = [
-    # "spi_monthly",
-    "gdd_monthly",
+    "spi_quarterly",
+    "days_in_99_percentile_sfcWind_monthly",
+    "days_in_99_percentile_pr_monthly",
     "frost_days_monthly",
-    "days_max_temp_above_28_monthly",
-    "days_avg_temp_above_28_monthly",
-    "days_in_97_5_percentile_tas_monthly",
-    "days_in_95_percentile_pr_monthly",
-    "days_in_95_percentile_rsds_monthly",
-    "days_in_90_percentile_sfcWind_monthly",
-    "days_in_95_percentile_sfcWind_monthly",
-    "gdd_weekly",
+    "spi_monthly",
     "frost_days_weekly",
-    "days_max_temp_above_28_weekly",
     "days_avg_temp_above_28_weekly",
-    "days_in_97_5_percentile_tas_weekly",
-    "days_in_95_percentile_pr_weekly",
-    "days_in_95_percentile_rsds_weekly",
-    "days_in_90_percentile_sfcWind_weekly",
-    "days_in_95_percentile_sfcWind_weekly",
     "pr_monthly",
     "rsds_monthly",
     "tasmax_monthly",
@@ -321,6 +308,13 @@ variables_to_pivot = [
     "tas_monthly",
     "sfcWind_monthly",
     "tasmin_monthly",
+    "pr_weekly",
+    "rsds_weekly",
+    "tasmax_weekly",
+    "hurs_weekly",
+    "tas_weekly",
+    "sfcWind_weekly",
+    "tasmin_weekly",
 ]
 
 df_train = pivot_dataframe(df_train, variables_to_pivot)
@@ -350,7 +344,7 @@ features_to_consider = (
         # "mean_regional_pr",
         # "mean_regional_frost_days",
         # "mean_regional_ww_yield_anomaly_percent_weighted",
-        # "mean_regional_ww_yield",
+        "mean_regional_ww_yield",
         # "spi",
         # "gdd_monthly",
         # "frost_days_monthly",
@@ -371,54 +365,67 @@ features_to_consider = (
         # "days_in_95_percentile_sfcWind_weekly",
         # "frost_days_weekly",
         # "tas_monthly",
+        # "tasmax_monthly",
+        # "tasmin_monthly",
         # "rsds_monthly",
         # "pr_monthly",
         # "hurs_monthly",
         # "sfcWind_monthly",
-        # "month_monthly",
+        # "tas_weekly",
+        # "tasmax_weekly",
+        # "tasmin_weekly",
+        # "rsds_weekly",
+        # "pr_weekly",
+        # "hurs_weekly",
+        # "sfcWind_weekly",
     ]
-    # + [f"spi_month_{i}" for i in range(1, 10)]
-    # + [f"gdd_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"frost_days_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_max_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_avg_temp_above_28_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_in_97_5_percentile_tas_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_in_95_percentile_pr_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_in_95_percentile_rsds_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_in_90_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"days_in_95_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
-    # + [f"gdd_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"frost_days_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_max_temp_above_28_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_avg_temp_above_28_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_in_97_5_percentile_tas_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_in_95_percentile_pr_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_in_95_percentile_rsds_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_in_90_percentile_sfcWind_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"days_in_95_percentile_sfcWind_weekly_week_{i}" for i in range(1, 40)]
-    # + [f"rsds_monthly_month_{i}" for i in range(1, 10)]
-    + [f"pr_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"spi_quarterly_quarter_{i}" for i in range(1, 4)]
+    + [f"spi_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_99_percentile_sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    + [f"days_in_99_percentile_pr_monthly_month_{i}" for i in range(1, 10)]
+    + [f"frost_days_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"pr_monthly_month_{i}" for i in range(1, 10)]
     # + [f"tasmax_monthly_month_{i}" for i in range(1, 10)]
     # + [f"tasmin_monthly_month_{i}" for i in range(1, 10)]
     # + [f"tas_monthly_month_{i}" for i in range(1, 10)]
     # + [f"hurs_monthly_month_{i}" for i in range(1, 10)]
     # + [f"sfcWind_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"rsds_monthly_month_{i}" for i in range(1, 10)]
+    # + [f"frost_days_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"days_avg_temp_above_28_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"rsds_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"pr_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"tasmax_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"tasmin_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"tas_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"hurs_weekly_week_{i}" for i in range(1, 40)]
+    # + [f"sfcWind_weekly_week_{i}" for i in range(1, 40)]
 )
-
+target = "ww_yield_average_detrended"
+# target = "ww_yield_anomaly_5yr"
 
 # --- Features and target ---
+
 X_train_years_excluded = df_train[features_to_consider]
-y_train_years_excluded = df_train["ww_yield"]
+y_train_years_excluded = df_train[target]
+
+df_train[features_to_consider + [target]].to_csv(
+    "../output/training_data_years_excluded.csv"
+)
 
 X_test_excluded_years = df_test[features_to_consider]
-y_test_excluded_years = df_test["ww_yield"]
-
+X_test_excluded_years = X_test_excluded_years.sort_index()
+y_test_excluded_years = df_test[target]
+y_test_excluded_years = y_test_excluded_years.sort_index()
+df_test[features_to_consider + [target]].to_csv(
+    "../output/testing_data_excluded_years.csv"
+)
 
 X_test_excluded_years_split = [
     df_year[features_to_consider] for df_year in df_test_split_list
 ]
 
-y_test_excluded_years_split = [df_year["ww_yield"] for df_year in df_test_split_list]
+y_test_excluded_years_split = [df_year[target] for df_year in df_test_split_list]
 
 # Train-validation split
 X_train, X_val, y_train, y_val = train_test_split(
@@ -428,19 +435,15 @@ X_train, X_val, y_train, y_val = train_test_split(
 X_train = X_train.sort_index()
 y_train = y_train.sort_index()
 
+X_val = X_val.sort_index()
+y_val = y_val.sort_index()
+
 # Hyperparameter grid for RandomizedSearchCV
-param_grid = {
-    "n_estimators": [500],
-}
+param_grid = {"n_estimators": [500]}
 
 
 # Create the Random Forest model
 rf = RandomForestRegressor()
-gdb = GradientBoostingRegressor()
-extra = ExtraTreeRegressor()
-xgb_model = xgb.XGBRegressor(
-    # early_stopping_rounds=10,
-)
 
 tscv = TimeSeriesSplit(n_splits=5)
 # Use RandomizedSearchCV for hyperparameter optimization
@@ -453,11 +456,7 @@ grid_search = GridSearchCV(
     verbose=2,
 )
 
-grid_search.fit(
-    X_train,
-    y_train,
-    # eval_set=[(X_test_excluded_years, y_test_excluded_years)]
-)
+grid_search.fit(X_train, y_train)
 
 pd.DataFrame(grid_search.cv_results_).to_csv("../output/grid_search_results.csv")
 # Get the best model from hyperparameter tuning
@@ -507,74 +506,6 @@ feature_importance.to_csv("../output/feature_importance.csv")
 
 print(grid_search.best_params_)
 
-# # combiner modell
-# rf_combine_months = RandomForestRegressor()
-#
-# y_pred = best_rf.predict(X_train_years_excluded)
-#
-# prediction_pivoted_on_month = y_pred.reshape(-1, 12)
-#
-# targets_combined_into_month = y_train_years_excluded[::12].values
-#
-# rf_combine_months.fit(prediction_pivoted_on_month, targets_combined_into_month)
-#
-# y_pred_train_second_tree = evaluate_model(
-#     rf_combine_months,
-#     prediction_pivoted_on_month,
-#     targets_combined_into_month,
-#     f"Month Combiner Random Forest on Training Data",
-# )
-#
-# plot_results(
-#     targets_combined_into_month,
-#     y_pred_train_second_tree,
-#     f"Month_Combiner_Random_Forest_on_Training_Data",
-# )
-#
-# y_pred = best_rf.predict(X_test_excluded_years)
-#
-# prediction_pivoted_on_month = y_pred.reshape(-1, 12)
-#
-# targets_combined_into_month = y_test_excluded_years[::12].values
-#
-# y_pred_test_excluded_second_tree = evaluate_model(
-#     rf_combine_months,
-#     prediction_pivoted_on_month,
-#     targets_combined_into_month,
-#     f"Month Combiner Random Forest Test Excluded Years: {', '.join(map(str,years_to_exclude))}",
-# )
-#
-# plot_results(
-#     targets_combined_into_month,
-#     y_pred_test_excluded_second_tree,
-#     f"Month_Combiner_Test_Excluded_Years_{'_'.join(map(str,years_to_exclude))}",
-# )
-#
-# feature_importance_combiner = pd.DataFrame(
-#     {
-#         "feature": [
-#             "January",
-#             "February",
-#             "March",
-#             "April",
-#             "May",
-#             "June",
-#             "July",
-#             "August",
-#             "September",
-#             "October",
-#             "November",
-#             "December",
-#         ],
-#         "importance": rf_combine_months.feature_importances_,
-#     }
-# ).sort_values("importance", ascending=False)
-#
-# print("\nMonth combiner Random Forest Feature Importance:")
-# print(feature_importance_combiner)
-# feature_importance_combiner.to_csv("../output/feature_importance_month_combiner.csv")
-
-
 # Get the best estimator from grid search
 best_estimator = grid_search.best_estimator_
 
@@ -589,11 +520,7 @@ n_estimators_values.sort()
 # Calculate RMSE for each value of n_estimators
 for n_estimators in n_estimators_values:
     best_estimator.set_params(n_estimators=n_estimators)
-    best_estimator.fit(
-        X_train,
-        y_train,
-        # eval_set=[(X_test_excluded_years, y_test_excluded_years)]
-    )
+    best_estimator.fit(X_train, y_train)
 
     # Predict on training, validation (using CV results), and test sets
     y_train_pred = best_estimator.predict(X_train)
