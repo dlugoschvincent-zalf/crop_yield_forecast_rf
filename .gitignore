@@ -6,4 +6,6 @@ masks
 logs
 elevation_data
 src/inspect_netcdf.py
+
 !dokumentation/plots
+!output/final_runs/ready_to_extract_data
