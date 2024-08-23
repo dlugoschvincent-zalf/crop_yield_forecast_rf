@@ -1,0 +1,15 @@
+name: crop_yield_forecast
+channels:
+  - conda-forge
+dependencies:
+  - xarray
+  - rasterio
+  - netcdf4
+  - dask
+  - pyproj
+  - geopandas
+  - hdf5plugin
+  - xgboost
+  - rioxarray
+  - seaborn
+prefix: /home/v/.conda/envs/crop_yield_forecast
